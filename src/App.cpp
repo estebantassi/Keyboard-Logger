@@ -1,4 +1,4 @@
-#include "App.hpp"
+﻿#include "App.hpp"
 
 bool App::OnInit()
 {
@@ -47,9 +47,9 @@ bool App::OnInit()
 
     wxPanel* panel = new wxPanel(m_frame);
 
-    m_label = new wxStaticText(panel, wxID_ANY, "Hello World");
     wxChoice* choice = new wxChoice(panel, wxID_ANY);
-    //m_listBox = new wxListBox(panel, wxID_ANY);
+    wxButton* button_Toggle_Recording = new wxButton(panel, wxID_ANY, m_isRunning ? "Stop" : "Start");
+    wxButton* button_Toggle_Release = new wxButton(panel, wxID_ANY, m_isListeningRelease ? "Stop listening to release" : "Listen to release");
 
     // Scrollable container
     m_scrollBox = new wxScrolledWindow(panel, wxID_ANY, wxDefaultPosition, wxSize(400, 200), wxVSCROLL);
@@ -60,13 +60,24 @@ bool App::OnInit()
     m_scrollBox->SetSizer(m_scrollBoxSizer);
 
     wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-    sizer->Add(m_label, 0, wxALL, 10);
+    sizer->Add(button_Toggle_Recording, 0, wxALL | wxEXPAND, 10);
+    sizer->Add(button_Toggle_Release, 0, wxALL | wxEXPAND, 10);
     sizer->Add(choice, 0, wxALL | wxEXPAND, 10);
     sizer->Add(m_scrollBox, 1, wxALL | wxEXPAND, 10);
     panel->SetSizer(sizer);
 
     m_scrollBox->FitInside();
     m_scrollBox->Layout();
+
+    button_Toggle_Recording->Bind(wxEVT_BUTTON, [this, button_Toggle_Recording](wxCommandEvent& event) {
+        this->m_isRunning = !this->m_isRunning;
+        button_Toggle_Recording->SetLabel(m_isRunning ? "Stop" : "Start");
+    });
+
+    button_Toggle_Release->Bind(wxEVT_BUTTON, [this, button_Toggle_Release](wxCommandEvent& event) {
+        this->m_isListeningRelease = !this->m_isListeningRelease;
+        button_Toggle_Release->SetLabel(m_isListeningRelease ? "Stop listening to release" : "Listen to release");
+    });
 
     choice->Bind(wxEVT_CHOICE, [this, choice](wxCommandEvent& event) {
         int selection = choice->GetSelection();
@@ -96,7 +107,7 @@ void App::AddEvent(std::string name)
     int thumbSize = m_scrollBox->GetScrollThumb(wxVERTICAL);
     bool atBottom = (curPos + thumbSize >= maxPos - 1);
 
-    wxButton* btn = new wxButton(m_scrollBox, wxID_ANY, name);
+    wxButton* btn = new wxButton(m_scrollBox, wxID_ANY, wxString::FromUTF8(name));
     m_scrollBoxSizer->Add(btn, 0, wxEXPAND | wxALL, 5);
 
     m_scrollBox->FitInside();
@@ -112,6 +123,8 @@ void App::AddEvent(std::string name)
 
 void App::OnKeyboardInput(RAWINPUT* raw)
 {
+    if (!m_isRunning) return;
+
     bool state = raw->data.keyboard.Flags % 2; //0 = down, 1 = up
     bool isExtended = false;
     if (raw->data.keyboard.Flags > 1) isExtended = true;
@@ -123,6 +136,16 @@ void App::OnKeyboardInput(RAWINPUT* raw)
 
     if (state == 1)
     {
+        if (m_isListeningRelease)
+        {
+            if (m_currentLayout.test(keyID))
+            {
+                const std::string& name = m_keyNames[keyID];
+                AddEvent(name + " (up)");
+            }
+            else AddEvent(HexToString(keyID) + " (up)");
+        }
+
         m_pressedKeys.reset(keyID);
         return;
     }
@@ -132,13 +155,9 @@ void App::OnKeyboardInput(RAWINPUT* raw)
     if (m_currentLayout.test(keyID))
     {
         const std::string& name = m_keyNames[keyID];
-        AddEvent(name);
+        AddEvent(name + " (down)");
     }
-    else
-    {
-        std::cout << "Unknown key: " << HexToString(keyID) << std::endl;
-        AddEvent(HexToString(keyID));
-    }
+    else AddEvent(HexToString(keyID) + " (down)");
 
     m_pressedKeys.set(keyID);
     
@@ -146,13 +165,14 @@ void App::OnKeyboardInput(RAWINPUT* raw)
 
 void App::OnMouseInput(RAWINPUT* raw)
 {
+    if (!m_isRunning) return;
+
     USHORT flag = raw->data.mouse.usButtonFlags;
 
     //flag == 0 means its probably a movement and not an action
-    if (flag != 0)
-    {
-        std::cout << MouseButtonName(flag) << std::endl;
-    }
+
+	const char* name = MouseButtonName(flag, m_isListeningRelease);
+    if (name != nullptr) AddEvent(name);
 }
 
 void App::ChangeLayout(wxString layout)

@@ -40,10 +40,8 @@ private:
     wxScrolledWindow* m_scrollBox;
     wxBoxSizer* m_scrollBoxSizer;
 
-    wxListBox* m_listBox;
-
-    //TEMP
-    wxStaticText* m_label;
+	bool m_isRunning = true;
+    bool m_isListeningRelease = true;
 };
 
 #endif
