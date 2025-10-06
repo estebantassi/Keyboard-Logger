@@ -27,8 +27,9 @@ bool App::OnInit()
     }
     m_layouts = JSON::parse(layoutsfile);
     
-    m_frame->onKeyboardInput = [this](RAWINPUT* raw) { this->OnKeyboardInput(raw); };
-    m_frame->onMouseInput = [this](RAWINPUT* raw) { this->OnMouseInput(raw); };
+    m_frame->m_inputQueue = &m_inputQueue;
+    m_frame->m_queueCV = &m_queueCV;
+    m_frame->m_queueMutex = &m_queueMutex;
 
     m_frame->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
         wxSize newSize = event.GetSize();
@@ -48,8 +49,7 @@ bool App::OnInit()
     wxPanel* panel = new wxPanel(m_frame);
 
     wxChoice* choice = new wxChoice(panel, wxID_ANY);
-    wxButton* button_Toggle_Recording = new wxButton(panel, wxID_ANY, m_isRunning ? "Stop" : "Start");
-    wxButton* button_Toggle_Release = new wxButton(panel, wxID_ANY, m_isListeningRelease ? "Stop listening to release" : "Listen to release");
+    wxButton* button_Toggle_Recording = new wxButton(panel, wxID_ANY, m_isListening ? "Stop" : "Start");
 
     // Scrollable container
     m_scrollBox = new wxScrolledWindow(panel, wxID_ANY, wxDefaultPosition, wxSize(400, 200), wxVSCROLL);
@@ -61,7 +61,6 @@ bool App::OnInit()
 
     wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
     sizer->Add(button_Toggle_Recording, 0, wxALL | wxEXPAND, 10);
-    sizer->Add(button_Toggle_Release, 0, wxALL | wxEXPAND, 10);
     sizer->Add(choice, 0, wxALL | wxEXPAND, 10);
     sizer->Add(m_scrollBox, 1, wxALL | wxEXPAND, 10);
     panel->SetSizer(sizer);
@@ -70,13 +69,8 @@ bool App::OnInit()
     m_scrollBox->Layout();
 
     button_Toggle_Recording->Bind(wxEVT_BUTTON, [this, button_Toggle_Recording](wxCommandEvent& event) {
-        this->m_isRunning = !this->m_isRunning;
-        button_Toggle_Recording->SetLabel(m_isRunning ? "Stop" : "Start");
-    });
-
-    button_Toggle_Release->Bind(wxEVT_BUTTON, [this, button_Toggle_Release](wxCommandEvent& event) {
-        this->m_isListeningRelease = !this->m_isListeningRelease;
-        button_Toggle_Release->SetLabel(m_isListeningRelease ? "Stop listening to release" : "Listen to release");
+        this->m_isListening = !this->m_isListening;
+        button_Toggle_Recording->SetLabel(m_isListening ? "Stop" : "Start");
     });
 
     choice->Bind(wxEVT_CHOICE, [this, choice](wxCommandEvent& event) {
@@ -96,11 +90,32 @@ bool App::OnInit()
         ChangeLayout(choice->GetString(0));
     }
 
+    m_inputWorker = std::thread([this]() {
+        while (m_isRunning) {
+            Input input;
+            {
+                std::unique_lock<std::mutex> lock(m_queueMutex);
+                m_queueCV.wait(lock, [this]() { return !m_inputQueue.empty() || !m_isRunning; });
+
+                if (!m_isRunning && m_inputQueue.empty())
+                    break;
+
+                input = m_inputQueue.front();
+                m_inputQueue.pop();
+            }
+
+            if (input.raw.header.dwType == RIM_TYPEKEYBOARD)
+                this->OnKeyboardInput(&input);
+            else if (input.raw.header.dwType == RIM_TYPEMOUSE)
+                this->OnMouseInput(&input);
+        }
+    });
+
     m_frame->Show(true);
     return true;
 }
 
-void App::AddEvent(std::string name)
+wxButton* App::AddEvent(std::string name)
 {
     int curPos = m_scrollBox->GetScrollPos(wxVERTICAL);
     int maxPos = m_scrollBox->GetScrollRange(wxVERTICAL);
@@ -119,11 +134,15 @@ void App::AddEvent(std::string name)
         if (newMax < 0) newMax = 0;
         m_scrollBox->Scroll(0, newMax);
     }
+
+    return btn;
 }
 
-void App::OnKeyboardInput(RAWINPUT* raw)
+void App::OnKeyboardInput(Input* input)
 {
-    if (!m_isRunning) return;
+    if (!m_isListening) return;
+
+    RAWINPUT* raw = &input->raw;
 
     bool state = raw->data.keyboard.Flags % 2; //0 = down, 1 = up
     bool isExtended = false;
@@ -134,45 +153,79 @@ void App::OnKeyboardInput(RAWINPUT* raw)
     //Ghost input
     if (keyID == 0xE02A) return;
 
-    if (state == 1)
-    {
-        if (m_isListeningRelease)
+    bool isPressed = m_pressedKeys.test(keyID);
+    bool isKnown = m_currentLayout.test(keyID);
+    std::string name = isKnown ? m_keyNames[keyID] : HexToString(keyID);
+
+    wxTheApp->CallAfter([this, state, isKnown, keyID, isPressed, name, input]() {
+        if (state == 1)
         {
-            if (m_currentLayout.test(keyID))
+            if (isKnown)
             {
-                const std::string& name = m_keyNames[keyID];
-                AddEvent(name + " (up)");
+                double duration = 0.0;
+                if (m_keyPressTime.find(keyID) != m_keyPressTime.end())
+                {
+                    duration = input->time - m_keyPressTime[keyID];
+                    m_keyPressTime.erase(keyID);
+                }
+				const std::string durationString = ShortenDouble(duration, 2);
+                const wxString& oldname = m_keyButtons[keyID]->GetLabel();
+                m_keyButtons[keyID]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + name + " (up)"));
+                m_keyButtons.erase(keyID);
             }
-            else AddEvent(HexToString(keyID) + " (up)");
+            m_pressedKeys.reset(keyID);
+            return;
         }
 
-        m_pressedKeys.reset(keyID);
-        return;
-    }
+        if (isPressed) return;
 
-    if (m_pressedKeys.test(keyID)) return;
-
-    if (m_currentLayout.test(keyID))
-    {
-        const std::string& name = m_keyNames[keyID];
-        AddEvent(name + " (down)");
-    }
-    else AddEvent(HexToString(keyID) + " (down)");
-
-    m_pressedKeys.set(keyID);
-    
+        wxButton* btn = AddEvent(name + " (down)");
+        m_pressedKeys.set(keyID);
+        m_keyButtons[keyID] = btn;
+        m_keyPressTime[keyID] = input->time;
+    });
 }
 
-void App::OnMouseInput(RAWINPUT* raw)
+void App::OnMouseInput(Input* input)
 {
-    if (!m_isRunning) return;
+    if (!m_isListening) return;
 
-    USHORT flag = raw->data.mouse.usButtonFlags;
+	RAWINPUT* raw = &input->raw;
+
+    MouseInput mouseInput = {
+        raw->data.mouse.usButtonFlags,
+        false,
+        nullptr
+    };
 
     //flag == 0 means its probably a movement and not an action
 
-	const char* name = MouseButtonName(flag, m_isListeningRelease);
-    if (name != nullptr) AddEvent(name);
+	GetMouseInput(&mouseInput);
+    if (mouseInput.name != nullptr)
+    {
+        wxTheApp->CallAfter([this, mouseInput, input]() {
+            if (!mouseInput.state)
+            {
+                const std::string& name = mouseInput.name;
+                wxButton* btn = AddEvent(name + " (down)");
+                m_mouseButtons[mouseInput.name] = btn;
+				m_mousePressTime[mouseInput.name] = input->time;
+            }
+            else if (mouseInput.state)
+            {
+                double duration = 0.0;
+                if (m_mousePressTime.find(mouseInput.name) != m_mousePressTime.end())
+                {
+                    duration = input->time - m_mousePressTime[mouseInput.name];
+                    m_mousePressTime.erase(mouseInput.name);
+                }
+                const std::string durationString = ShortenDouble(duration, 2);
+                const wxString& oldname = m_mouseButtons[mouseInput.name]->GetLabel();
+                m_mouseButtons[mouseInput.name]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + mouseInput.name + " (up)"));
+                m_mouseButtons.erase(mouseInput.name);
+            }
+        });
+    }
 }
 
 void App::ChangeLayout(wxString layout)
@@ -183,4 +236,12 @@ void App::ChangeLayout(wxString layout)
         m_keyNames[StringToHex(item.key())] = item.value();
         m_currentLayout.set(StringToHex(item.key()));
     }
+}
+
+int App::OnExit() {
+    m_isRunning = false;
+    m_queueCV.notify_one();
+    if (m_inputWorker.joinable())
+        m_inputWorker.join();
+    return 0;
 }
