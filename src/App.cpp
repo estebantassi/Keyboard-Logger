@@ -7,7 +7,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     {
         KBDLLHOOKSTRUCT* kb = (KBDLLHOOKSTRUCT*)lParam;
 
-        // Determine key state
         bool keyDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         bool keyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
         bool extended = (kb->flags & LLKHF_EXTENDED);
@@ -100,7 +99,22 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
+DWORD WINAPI HookThreadProc(LPVOID)
+{
+    HHOOK keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
+    HHOOK mouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
 
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    UnhookWindowsHookEx(mouseHook);
+    UnhookWindowsHookEx(keyboardHook);
+    return 0;
+}
 
 bool App::OnInit()
 {
@@ -202,13 +216,15 @@ bool App::OnInit()
         }
     });
 
-    m_keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
-    if (!m_keyboardHook)
-        wxLogError("Failed to install keyboard hook");
-
-    m_mouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
-    if (!m_mouseHook)
-        wxLogError("Failed to install mouse hook");
+    HANDLE hHookThread = CreateThread(nullptr, 0, HookThreadProc, nullptr, 0, nullptr);
+    if (!hHookThread)
+    {
+        wxLogError("Failed to create hook thread");
+    }
+    else
+    {
+        CloseHandle(hHookThread);
+    }
 
     m_frame->Show(true);
     return true;
@@ -314,7 +330,7 @@ void App::OnKeyboardInput(Input* input)
             AddTextEvent(deltaTimeString);
         }
 
-        wxButton* btn = AddButtonEvent(name + " (down)");
+        wxStaticText* btn = AddTextEvent(name + " (down)");
         m_pressedKeys.set(keyID);
         m_keyButtons[keyID] = btn;
         m_keyPressTime[keyID] = time;
@@ -369,7 +385,7 @@ void App::OnMouseInput(Input* input)
             }
 
             const std::string& name = mouseInput.name;
-            wxButton* btn = AddButtonEvent(name + " (down)");
+            wxStaticText* btn = AddTextEvent(name + " (down)");
             m_mouseButtons[mouseInput.name] = btn;
             m_mousePressTime[mouseInput.name] = time;
         });
