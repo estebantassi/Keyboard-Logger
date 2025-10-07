@@ -1,5 +1,107 @@
 ﻿#include "App.hpp"
 
+LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    double time = NowMs();
+    if (nCode == HC_ACTION && App::s_instance)
+    {
+        KBDLLHOOKSTRUCT* kb = (KBDLLHOOKSTRUCT*)lParam;
+
+        // Determine key state
+        bool keyDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+        bool keyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+        bool extended = (kb->flags & LLKHF_EXTENDED);
+
+        if (keyDown || keyUp)
+        {
+            RAWINPUT raw = {};
+
+            raw.header.dwType = RIM_TYPEKEYBOARD;
+            raw.header.dwSize = sizeof(RAWINPUT);
+            raw.header.hDevice = nullptr;
+            raw.header.wParam = 0;
+            
+            raw.data.keyboard.MakeCode = kb->scanCode;
+            raw.data.keyboard.Flags = (keyUp ? RI_KEY_BREAK : 0) | (extended ? RI_KEY_E0 : 0);
+            raw.data.keyboard.VKey = kb->vkCode;
+            raw.data.keyboard.Reserved = 0;
+            raw.data.keyboard.ExtraInformation = 0;
+
+            Input input = { raw, time };
+
+            {
+                std::lock_guard<std::mutex> lock(App::s_instance->m_queueMutex);
+                App::s_instance->m_inputQueue.push(input);
+            }
+            App::s_instance->m_queueCV.notify_one();
+        }
+    }
+
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    double time = NowMs();
+    if (nCode == HC_ACTION && App::s_instance)
+    {
+        MSLLHOOKSTRUCT* ms = (MSLLHOOKSTRUCT*)(lParam);
+        
+        RAWINPUT raw = {};
+        raw.header.dwType = RIM_TYPEMOUSE;
+
+        switch (wParam)
+        {
+        case WM_LBUTTONDOWN: raw.data.mouse.usButtonFlags = RI_MOUSE_LEFT_BUTTON_DOWN; break;
+        case WM_LBUTTONUP:   raw.data.mouse.usButtonFlags = RI_MOUSE_LEFT_BUTTON_UP; break;
+
+        case WM_RBUTTONDOWN: raw.data.mouse.usButtonFlags = RI_MOUSE_RIGHT_BUTTON_DOWN; break;
+        case WM_RBUTTONUP:   raw.data.mouse.usButtonFlags = RI_MOUSE_RIGHT_BUTTON_UP; break;
+
+        case WM_MBUTTONDOWN: raw.data.mouse.usButtonFlags = RI_MOUSE_MIDDLE_BUTTON_DOWN; break;
+        case WM_MBUTTONUP:   raw.data.mouse.usButtonFlags = RI_MOUSE_MIDDLE_BUTTON_UP; break;
+
+        case WM_XBUTTONDOWN:
+        {
+            WORD button = HIWORD(ms->mouseData);
+            if (button == XBUTTON1)
+                raw.data.mouse.usButtonFlags = RI_MOUSE_BUTTON_4_DOWN;
+            else if (button == XBUTTON2)
+                raw.data.mouse.usButtonFlags = RI_MOUSE_BUTTON_5_DOWN;
+            break;
+        }
+
+        case WM_XBUTTONUP:
+        {
+            WORD button = HIWORD(ms->mouseData);
+            if (button == XBUTTON1)
+                raw.data.mouse.usButtonFlags = RI_MOUSE_BUTTON_4_UP;
+            else if (button == XBUTTON2)
+                raw.data.mouse.usButtonFlags = RI_MOUSE_BUTTON_5_UP;
+            break;
+        }
+
+		default: time = 0.0; break;
+        }
+
+        if (time > 0.0)
+        {
+            Input input = { raw, time };
+
+            {
+                std::lock_guard<std::mutex> lock(App::s_instance->m_queueMutex);
+                App::s_instance->m_inputQueue.push(input);
+            }
+            App::s_instance->m_queueCV.notify_one();
+        }
+
+    }
+
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
+
+
 bool App::OnInit()
 {
     #ifdef _DEBUG
@@ -8,14 +110,16 @@ bool App::OnInit()
     #include <iostream>
     #include <cstdio>
 
-    AllocConsole();               // create a new console window
+    AllocConsole();
     FILE* fp;
-    freopen_s(&fp, "CONOUT$", "w", stdout);   // redirect stdout
-    freopen_s(&fp, "CONOUT$", "w", stderr);   // redirect stderr
+    freopen_s(&fp, "CONOUT$", "w", stdout);
+    freopen_s(&fp, "CONOUT$", "w", stderr);
     std::cout.clear();
     std::cerr.clear();
 
     #endif
+
+    App::s_instance = this;
 
     m_frame = new Frame(m_title, wxSize(600, 400));
     m_frame->SetMinSize(wxSize(400, 200));
@@ -26,25 +130,12 @@ bool App::OnInit()
         return 0;
     }
     m_layouts = JSON::parse(layoutsfile);
-    
-    m_frame->m_inputQueue = &m_inputQueue;
-    m_frame->m_queueCV = &m_queueCV;
-    m_frame->m_queueMutex = &m_queueMutex;
 
     m_frame->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
         wxSize newSize = event.GetSize();
         m_frame->SetTitle(m_title + " (" + std::to_string(newSize.x) + ", " + std::to_string(newSize.y) + ")");
         event.Skip();
     });
-
-    RAWINPUTDEVICE rid[2];
-    //KEYBOARD
-    rid[0].usUsagePage = 0x01; rid[0].usUsage = 0x06; rid[0].dwFlags = RIDEV_INPUTSINK; rid[0].hwndTarget = (HWND)m_frame->GetHandle();
-    //MOUSE
-    rid[1].usUsagePage = 0x01; rid[1].usUsage = 0x02; rid[1].dwFlags = RIDEV_INPUTSINK; rid[1].hwndTarget = (HWND)m_frame->GetHandle();
-
-    if (!RegisterRawInputDevices(rid, 2, sizeof(RAWINPUTDEVICE)))
-        wxLogError("Failed to register raw input devices.");
 
     wxPanel* panel = new wxPanel(m_frame);
 
@@ -111,11 +202,19 @@ bool App::OnInit()
         }
     });
 
+    m_keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
+    if (!m_keyboardHook)
+        wxLogError("Failed to install keyboard hook");
+
+    m_mouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
+    if (!m_mouseHook)
+        wxLogError("Failed to install mouse hook");
+
     m_frame->Show(true);
     return true;
 }
 
-wxButton* App::AddEvent(std::string name)
+wxButton* App::AddButtonEvent(std::string name)
 {
     int curPos = m_scrollBox->GetScrollPos(wxVERTICAL);
     int maxPos = m_scrollBox->GetScrollRange(wxVERTICAL);
@@ -138,11 +237,35 @@ wxButton* App::AddEvent(std::string name)
     return btn;
 }
 
+wxStaticText* App::AddTextEvent(std::string name)
+{
+    int curPos = m_scrollBox->GetScrollPos(wxVERTICAL);
+    int maxPos = m_scrollBox->GetScrollRange(wxVERTICAL);
+    int thumbSize = m_scrollBox->GetScrollThumb(wxVERTICAL);
+    bool atBottom = (curPos + thumbSize >= maxPos - 1);
+
+    wxStaticText* label = new wxStaticText(m_scrollBox, wxID_ANY, name);
+    m_scrollBoxSizer->Add(label, 0, wxEXPAND | wxALL, 5);
+
+    m_scrollBox->FitInside();
+    m_scrollBox->Layout();
+
+    if (atBottom)
+    {
+        int newMax = m_scrollBox->GetScrollRange(wxVERTICAL);
+        if (newMax < 0) newMax = 0;
+        m_scrollBox->Scroll(0, newMax);
+    }
+
+    return label;
+}
+
 void App::OnKeyboardInput(Input* input)
 {
     if (!m_isListening) return;
 
     RAWINPUT* raw = &input->raw;
+	double time = input->time;
 
     bool state = raw->data.keyboard.Flags % 2; //0 = down, 1 = up
     bool isExtended = false;
@@ -157,21 +280,27 @@ void App::OnKeyboardInput(Input* input)
     bool isKnown = m_currentLayout.test(keyID);
     std::string name = isKnown ? m_keyNames[keyID] : HexToString(keyID);
 
-    wxTheApp->CallAfter([this, state, isKnown, keyID, isPressed, name, input]() {
-        if (state == 1)
+	double deltaTimePress = state ? 0.0 : time - m_lastEventTime;
+	if (!state) m_lastEventTime = time;
+    
+    wxTheApp->CallAfter([this, state, isKnown, keyID, isPressed, name, time, deltaTimePress]() {
+		if (state == 1)
         {
             if (isKnown)
             {
                 double duration = 0.0;
                 if (m_keyPressTime.find(keyID) != m_keyPressTime.end())
                 {
-                    duration = input->time - m_keyPressTime[keyID];
+                    duration = time - m_keyPressTime[keyID];
                     m_keyPressTime.erase(keyID);
                 }
 				const std::string durationString = ShortenDouble(duration, 2);
-                const wxString& oldname = m_keyButtons[keyID]->GetLabel();
-                m_keyButtons[keyID]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + name + " (up)"));
-                m_keyButtons.erase(keyID);
+                if (m_keyButtons.find(keyID) != m_keyButtons.end())
+                {
+                    const wxString oldname = m_keyButtons[keyID]->GetLabel();
+                    m_keyButtons[keyID]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + name + " (up)"));
+                    m_keyButtons.erase(keyID);
+                }
             }
             m_pressedKeys.reset(keyID);
             return;
@@ -179,10 +308,16 @@ void App::OnKeyboardInput(Input* input)
 
         if (isPressed) return;
 
-        wxButton* btn = AddEvent(name + " (down)");
+        if (deltaTimePress > 0.0)
+        {
+            const std::string deltaTimeString = ShortenDouble(deltaTimePress, 2);
+            AddTextEvent(deltaTimeString);
+        }
+
+        wxButton* btn = AddButtonEvent(name + " (down)");
         m_pressedKeys.set(keyID);
         m_keyButtons[keyID] = btn;
-        m_keyPressTime[keyID] = input->time;
+        m_keyPressTime[keyID] = time;
     });
 }
 
@@ -191,6 +326,7 @@ void App::OnMouseInput(Input* input)
     if (!m_isListening) return;
 
 	RAWINPUT* raw = &input->raw;
+	double time = input->time;
 
     MouseInput mouseInput = {
         raw->data.mouse.usButtonFlags,
@@ -199,31 +335,43 @@ void App::OnMouseInput(Input* input)
     };
 
     //flag == 0 means its probably a movement and not an action
-
 	GetMouseInput(&mouseInput);
+
+    double deltaTimePress = mouseInput.state ? 0.0 : time - m_lastEventTime;
+    if (!mouseInput.state) m_lastEventTime = time;
+
     if (mouseInput.name != nullptr)
     {
-        wxTheApp->CallAfter([this, mouseInput, input]() {
-            if (!mouseInput.state)
-            {
-                const std::string& name = mouseInput.name;
-                wxButton* btn = AddEvent(name + " (down)");
-                m_mouseButtons[mouseInput.name] = btn;
-				m_mousePressTime[mouseInput.name] = input->time;
-            }
-            else if (mouseInput.state)
+        wxTheApp->CallAfter([this, mouseInput, time, deltaTimePress]() {
+            if (mouseInput.state)
             {
                 double duration = 0.0;
                 if (m_mousePressTime.find(mouseInput.name) != m_mousePressTime.end())
                 {
-                    duration = input->time - m_mousePressTime[mouseInput.name];
+                    duration = time - m_mousePressTime[mouseInput.name];
                     m_mousePressTime.erase(mouseInput.name);
                 }
                 const std::string durationString = ShortenDouble(duration, 2);
-                const wxString& oldname = m_mouseButtons[mouseInput.name]->GetLabel();
-                m_mouseButtons[mouseInput.name]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + mouseInput.name + " (up)"));
-                m_mouseButtons.erase(mouseInput.name);
+                if (m_mouseButtons.find(mouseInput.name) != m_mouseButtons.end())
+                {
+                    const wxString oldname = m_mouseButtons[mouseInput.name]->GetLabel();
+                    m_mouseButtons[mouseInput.name]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + mouseInput.name + " (up)"));
+                    m_mouseButtons.erase(mouseInput.name);
+                }
+
+                return;
             }
+  
+            if (deltaTimePress > 0.0)
+            {
+                const std::string deltaTimeString = ShortenDouble(deltaTimePress, 2);
+                AddTextEvent(deltaTimeString);
+            }
+
+            const std::string& name = mouseInput.name;
+            wxButton* btn = AddButtonEvent(name + " (down)");
+            m_mouseButtons[mouseInput.name] = btn;
+            m_mousePressTime[mouseInput.name] = time;
         });
     }
 }
@@ -243,5 +391,11 @@ int App::OnExit() {
     m_queueCV.notify_one();
     if (m_inputWorker.joinable())
         m_inputWorker.join();
+    if (m_mouseHook)
+        UnhookWindowsHookEx(m_mouseHook);
+	if (m_keyboardHook)
+		UnhookWindowsHookEx(m_keyboardHook);
     return 0;
 }
+
+App* App::s_instance = nullptr;

@@ -25,6 +25,7 @@ static double NowMs() {
 static std::string ShortenDouble(double time, int size) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(size) << time;
+    oss << "ms";
     return oss.str();
 }
 

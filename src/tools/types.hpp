@@ -14,4 +14,13 @@ struct Input {
 	double time;
 };
 
+struct TestInput
+{
+	double time;
+	DWORD vkCode;    // virtual key
+	DWORD scanCode;
+	DWORD flags;
+	bool isDown;
+};
+
 #endif
