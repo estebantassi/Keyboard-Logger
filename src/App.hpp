@@ -45,7 +45,6 @@ private:
     void OnKeyboardInput(Input* input);
     void OnMouseInput(Input* input);
     void ChangeLayout(wxString layout);
-    wxButton* AddButtonEvent(std::string name);
     wxStaticText* AddTextEvent(std::string name);
 
     std::string m_title = "Keyboard Logger";
@@ -58,6 +57,8 @@ private:
     std::unordered_map<uint32_t, double> m_keyPressTime;
     std::unordered_map<char*, double> m_mousePressTime;
 
+    int m_elementsCount = 5;
+
 	double m_lastEventTime = 0.0;
 
     std::unordered_map<uint32_t, wxStaticText*> m_keyButtons;
@@ -66,7 +67,7 @@ private:
     wxScrolledWindow* m_scrollBox;
     wxBoxSizer* m_scrollBoxSizer;
 
-	bool m_isListening = true;
+    bool m_isListening = false;
 };
 
 #endif

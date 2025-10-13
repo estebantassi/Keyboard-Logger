@@ -164,9 +164,16 @@ bool App::OnInit()
     m_scrollBoxSizer = new wxBoxSizer(wxVERTICAL);
     m_scrollBox->SetSizer(m_scrollBoxSizer);
 
+	wxSlider* slider = new wxSlider(panel, wxID_ANY, 50, 0, 100);
+	slider->SetValue(m_elementsCount);
+    slider->SetRange(1, 100);
+    wxStaticText* label = new wxStaticText(panel, wxID_ANY, std::to_string(m_elementsCount));
+
     wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
     sizer->Add(button_Toggle_Recording, 0, wxALL | wxEXPAND, 10);
     sizer->Add(choice, 0, wxALL | wxEXPAND, 10);
+	sizer->Add(label, 0, wxALL | wxEXPAND, 10);
+	sizer->Add(slider, 0, wxALL | wxEXPAND, 10);
     sizer->Add(m_scrollBox, 1, wxALL | wxEXPAND, 10);
     panel->SetSizer(sizer);
 
@@ -177,6 +184,36 @@ bool App::OnInit()
         this->m_isListening = !this->m_isListening;
         button_Toggle_Recording->SetLabel(m_isListening ? "Stop" : "Start");
     });
+
+    slider->Bind(wxEVT_SLIDER, [this, slider, label](wxCommandEvent& event) {
+        int value = slider->GetValue();
+        this->m_elementsCount = value;
+        label->SetLabel(std::to_string(value));
+
+        size_t currentCount = m_scrollBoxSizer->GetItemCount();
+        if (currentCount > static_cast<size_t>(m_elementsCount))
+        {
+            for (size_t i = currentCount; i > static_cast<size_t>(m_elementsCount); --i)
+            {
+                wxSizerItem* item = m_scrollBoxSizer->GetItem(i - 1);
+                if (!item) continue;
+
+                if (item->IsWindow())
+                {
+                    wxWindow* win = item->GetWindow();
+                    m_scrollBoxSizer->Detach(win);
+                    win->Destroy();
+                }
+                else
+                {
+                    m_scrollBoxSizer->Remove(i - 1);
+                }
+            }
+
+            m_scrollBox->FitInside();
+            m_scrollBox->Layout();
+        }
+	});
 
     choice->Bind(wxEVT_CHOICE, [this, choice](wxCommandEvent& event) {
         int selection = choice->GetSelection();
@@ -230,29 +267,6 @@ bool App::OnInit()
     return true;
 }
 
-wxButton* App::AddButtonEvent(std::string name)
-{
-    int curPos = m_scrollBox->GetScrollPos(wxVERTICAL);
-    int maxPos = m_scrollBox->GetScrollRange(wxVERTICAL);
-    int thumbSize = m_scrollBox->GetScrollThumb(wxVERTICAL);
-    bool atBottom = (curPos + thumbSize >= maxPos - 1);
-
-    wxButton* btn = new wxButton(m_scrollBox, wxID_ANY, wxString::FromUTF8(name));
-    m_scrollBoxSizer->Add(btn, 0, wxEXPAND | wxALL, 5);
-
-    m_scrollBox->FitInside();
-    m_scrollBox->Layout();
-
-    if (atBottom)
-    {
-        int newMax = m_scrollBox->GetScrollRange(wxVERTICAL);
-        if (newMax < 0) newMax = 0;
-        m_scrollBox->Scroll(0, newMax);
-    }
-
-    return btn;
-}
-
 wxStaticText* App::AddTextEvent(std::string name)
 {
     int curPos = m_scrollBox->GetScrollPos(wxVERTICAL);
@@ -262,6 +276,17 @@ wxStaticText* App::AddTextEvent(std::string name)
 
     wxStaticText* label = new wxStaticText(m_scrollBox, wxID_ANY, name);
     m_scrollBoxSizer->Add(label, 0, wxEXPAND | wxALL, 5);
+
+    if (m_scrollBoxSizer->GetItemCount() > m_elementsCount * 2)
+    {
+        wxSizerItem* item = m_scrollBoxSizer->GetItem((size_t)0);
+        if (item && item->IsWindow())
+        {
+            wxWindow* win = item->GetWindow();
+            m_scrollBoxSizer->Detach(win);
+            win->Destroy();
+        }
+    }
 
     m_scrollBox->FitInside();
     m_scrollBox->Layout();
@@ -290,7 +315,7 @@ void App::OnKeyboardInput(Input* input)
     //Convert key to unique ID
     uint32_t keyID = (isExtended ? 0xE000 : 0x0000) | raw->data.keyboard.MakeCode;
     //Ghost input
-    if (keyID == 0xE02A) return;
+    if (keyID == 0xE02A || keyID == 0x021D) return;
 
     bool isPressed = m_pressedKeys.test(keyID);
     bool isKnown = m_currentLayout.test(keyID);
@@ -313,6 +338,11 @@ void App::OnKeyboardInput(Input* input)
 				const std::string durationString = ShortenDouble(duration, 2);
                 if (m_keyButtons.find(keyID) != m_keyButtons.end())
                 {
+                    if (m_keyButtons[keyID]->IsBeingDeleted())
+                    {
+                        m_keyButtons.erase(keyID);
+                        return;
+                    }
                     const wxString oldname = m_keyButtons[keyID]->GetLabel();
                     m_keyButtons[keyID]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + name + " (up)"));
                     m_keyButtons.erase(keyID);
@@ -370,6 +400,11 @@ void App::OnMouseInput(Input* input)
                 const std::string durationString = ShortenDouble(duration, 2);
                 if (m_mouseButtons.find(mouseInput.name) != m_mouseButtons.end())
                 {
+                    if (m_mouseButtons[mouseInput.name]->IsBeingDeleted())
+                    {
+                        m_mouseButtons.erase(mouseInput.name);
+                        return;
+                    }
                     const wxString oldname = m_mouseButtons[mouseInput.name]->GetLabel();
                     m_mouseButtons[mouseInput.name]->SetLabel(wxString::FromUTF8(oldname + " | " + durationString + " | " + mouseInput.name + " (up)"));
                     m_mouseButtons.erase(mouseInput.name);
